@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AR Hand Survival - จับเหรียญหลบหิน</title>
+    <!-- Tailwind CSS สำหรับตกแต่ง UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe Hands สำหรับตรวจจับมือ -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #1a202c; font-family: 'Kanit', sans-serif; }
+        #game-container { position: relative; width: 100%; height: 100%; }
+        /* พลิกวิดีโอและแคนวาสซ้ายขวาให้เหมือนกระจกเงา */
+        #webcam { display: none; }
+        #game-canvas { 
+            position: absolute; 
+            top: 0; left: 0; 
+            width: 100%; height: 100%; 
+            object-fit: cover;
+            transform: scaleX(-1); /* สลับซ้ายขวา */
+        }
+        .ui-layer {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none; 
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        .interactive-btn { pointer-events: auto; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <!-- กล้องวิดีโอ (ซ่อนไว้ ใช้แค่ดึงภาพ) -->
+    <video id="webcam" autoplay playsinline></video>
+    
+    <!-- Canvas สำหรับวาดเกมและกราฟิก -->
+    <canvas id="game-canvas"></canvas>
+
+    <!-- UI: แสดงคะแนนและพลังชีวิต -->
+    <div id="hud" class="absolute top-4 left-4 right-4 flex justify-between z-10 hidden">
+        <div class="bg-blue-600/80 text-white px-4 py-2 rounded-xl text-2xl font-bold shadow-lg border-2 border-blue-400">
+            คะแนน: <span id="score">0</span>
+        </div>
+        <div class="bg-red-600/80 text-white px-4 py-2 rounded-xl text-2xl font-bold shadow-lg border-2 border-red-400">
+            พลังชีวิต: <span id="lives">3</span>
+        </div>
+    </div>
+
+    <!-- UI: หน้าจอโหลดและตรวจสอบกล้อง -->
+    <div id="loading-screen" class="ui-layer bg-gray-900/90 text-white backdrop-blur-sm">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-500 mb-4"></div>
+        <h1 class="text-2xl font-bold mb-2">กำลังเตรียมระบบ AR...</h1>
+        <p id="loading-msg" class="text-gray-300 text-center max-w-md px-4">กำลังขอสิทธิ์เข้าถึงกล้อง กรุณากด "อนุญาต (Allow)"</p>
+    </div>
+
+    <!-- UI: หน้าจอเริ่มเกม -->
+    <div id="start-screen" class="ui-layer bg-black/60 backdrop-blur-md hidden">
+        <div class="bg-white text-gray-900 p-8 rounded-3xl shadow-2xl max-w-lg text-center transform transition-transform border-4 border-blue-500">
+            <h1 class="text-4xl font-black text-blue-600 mb-4">🖐️ AR Survival</h1>
+            <p class="text-lg mb-6">ใช้นิ้วชี้ของคุณเป็นตัวควบคุมชี้ไปที่หน้าจอ!<br><br>
+               🟡 <b>แตะเหรียญทอง</b> เพื่อทำคะแนน<br>
+               🪨 <b>หลบก้อนหิน</b> ระวังอย่าให้โดนนิ้ว!</p>
+            <button id="start-btn" class="interactive-btn bg-gradient-to-r from-green-400 to-blue-500 hover:from-green-500 hover:to-blue-600 text-white text-2xl font-bold py-3 px-8 rounded-full shadow-lg transform hover:scale-105 transition-all">
+                เริ่มเกมเลย!
+            </button>
+        </div>
+    </div>
+
+    <!-- UI: หน้าจอจบเกม -->
+    <div id="game-over-screen" class="ui-layer bg-red-900/80 backdrop-blur-md hidden">
+        <div class="bg-white text-gray-900 p-8 rounded-3xl shadow-2xl max-w-lg text-center border-4 border-red-500">
+            <h1 class="text-5xl font-black text-red-600 mb-2">GAME OVER</h1>
+            <p class="text-2xl mb-6">คุณได้คะแนน: <span id="final-score" class="font-bold text-blue-600 text-3xl">0</span></p>
+            <button id="restart-btn" class="interactive-btn bg-gradient-to-r from-orange-400 to-red-500 hover:from-orange-500 hover:to-red-600 text-white text-2xl font-bold py-3 px-8 rounded-full shadow-lg transform hover:scale-105 transition-all">
+                เล่นอีกครั้ง 🔄
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('game-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    
+    const loadingScreen = document.getElementById('loading-screen');
+    const loadingMsg = document.getElementById('loading-msg');
+    const startScreen = document.getElementById('start-screen');
+    const gameOverScreen = document.getElementById('game-over-screen');
+    const hud = document.getElementById('hud');
+    const scoreUI = document.getElementById('score');
+    const livesUI = document.getElementById('lives');
+    const finalScoreUI = document.getElementById('final-score');
+    
+    const startBtn = document.getElementById('start-btn');
+    const restartBtn = document.getElementById('restart-btn');
+
+    let gameState = 'LOADING'; 
+    let score = 0;
+    let lives = 3;
+    let gameObjects = [];
+    let difficultyMultiplier = 1;
+    
+    let pointerX = -100;
+    let pointerY = -100;
+    let isHandDetected = false;
+
+    function resizeCanvas() {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // 1. ระบบจัดการกล้องที่ปลอดภัยยิ่งขึ้น (รองรับอุปกรณ์ทุกประเภท)
+    async function setupCamera() {
+        try {
+            // ลองขอสิทธิ์กล้องแบบมาตรฐานพื้นฐานก่อน เพื่อป้องกันข้อผิดพลาด Requested device not found
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false
+            });
+            videoElement.srcObject = stream;
+            
+            return new Promise((resolve) => {
+                videoElement.onloadedmetadata = () => {
+                    resolve(videoElement);
+                };
+            });
+        } catch (err) {
+            console.error("Camera Error:", err);
+            let errorText = "ไม่สามารถเปิดกล้องได้: " + err.message;
+            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+                errorText = "คุณปฏิเสธการอนุญาตใช้งานกล้อง! กรุณาอนุญาตสิทธิ์กล้องในเบราว์เซอร์แล้วรีเฟรชหน้าเว็บ";
+            } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+                errorText = "ไม่พบอุปกรณ์กล้อง (Webcam) ที่เชื่อมต่อกับอุปกรณ์ของคุณ";
+            } else if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+                errorText = "บราวเซอร์อาจบล็อกการใช้งานกล้อง เนื่องจากไม่ได้รันบน HTTPS หรือ Localhost";
+            }
+            loadingMsg.innerHTML = `<span class="text-red-400 font-bold block mt-2">${errorText}</span>`;
+            document.querySelector('.animate-spin').style.display = 'none';
+            throw err;
+        }
+    }
+
+    // 2. ตั้งค่า MediaPipe Hands
+    const hands = new Hands({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+    
+    hands.setOptions({
+        maxNumHands: 1, 
+        modelComplexity: 1, 
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+    });
+
+    hands.onResults((results) => {
+        isHandDetected = false;
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            isHandDetected = true;
+            const landmarks = results.multiHandLandmarks[0];
+            const indexFingerTip = landmarks[8]; // ปลายนิ้วชี้
+            
+            pointerX = (1 - indexFingerTip.x) * canvasElement.width; 
+            pointerY = indexFingerTip.y * canvasElement.height;
+        }
+    });
+
+    let lastVideoTime = -1;
+    async function processVideoFrame() {
+        if (videoElement.readyState >= 2) {
+            if (videoElement.currentTime !== lastVideoTime) {
+                lastVideoTime = videoElement.currentTime;
+                await hands.send({image: videoElement});
+            }
+        }
+        requestAnimationFrame(processVideoFrame);
+    }
+
+    async function initSystem() {
+        try {
+            await setupCamera();
+            loadingMsg.innerText = "กำลังโหลดโมเดล AI ตรวจจับมือ...";
+            
+            await hands.send({image: videoElement});
+            
+            loadingScreen.classList.add('hidden');
+            startScreen.classList.remove('hidden');
+            gameState = 'START';
+            
+            processVideoFrame();
+            gameLoop();
+            
+        } catch (err) {
+            // จัดการ Error ไว้ใน setupCamera แล้ว
+        }
+    }
+
+    initSystem();
+
+    // 3. ระบบเกม (Game Logic)
+    class GameObject {
+        constructor(type) {
+            this.type = type; 
+            this.x = Math.random() * (canvasElement.width - 100) + 50; 
+            this.y = -50;
+            const baseSpeed = type === 'coin' ? 3 : 5;
+            this.speed = (baseSpeed + Math.random() * 2) * difficultyMultiplier;
+            this.radius = type === 'coin' ? 30 : 40;
+            this.active = true;
+            this.rotation = 0;
+            this.rotationSpeed = (Math.random() - 0.5) * 0.1;
+        }
+
+        update() {
+            this.y += this.speed;
+            this.rotation += this.rotationSpeed;
+            if (this.y > canvasElement.height + 100) {
+                this.active = false;
+            }
+        }
+
+        draw(ctx) {
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.rotation);
+            
+            if (this.type === 'coin') {
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#FFD700'; 
+                ctx.fill();
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = '#DAA520';
+                ctx.stroke();
+                
+                ctx.beginPath();
+                ctx.arc(0, 0, this.radius * 0.7, 0, Math.PI * 2);
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.fillStyle = '#DAA520';
+                ctx.font = 'bold 30px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.scale(-1, 1);
+                ctx.fillText('$', 0, 0);
+
+            } else if (this.type === 'rock') {
+                ctx.beginPath();
+                const points = 7;
+                for (let i = 0; i < points; i++) {
+                    const angle = (i / points) * Math.PI * 2;
+                    const r = this.radius * (0.8 + Math.random() * 0.4 - (i===0?0:0.2)); 
+                    const px = Math.cos(angle) * r;
+                    const py = Math.sin(angle) * r;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.closePath();
+                ctx.fillStyle = '#6B7280'; 
+                ctx.fill();
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#4B5563';
+                ctx.stroke();
+                
+                ctx.scale(-1, 1);
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.beginPath(); ctx.arc(-10, -10, 5, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(15, 5, 8, 0, Math.PI*2); ctx.fill();
+            }
+            
+            ctx.restore();
+        }
+    }
+
+    function spawnObject() {
+        if (gameState !== 'PLAYING') return;
+        
+        const type = Math.random() > 0.4 ? 'coin' : 'rock';
+        gameObjects.push(new GameObject(type));
+        
+        let spawnRate = 1000 - (score * 10);
+        if (spawnRate < 300) spawnRate = 300; 
+        
+        setTimeout(spawnObject, spawnRate);
+    }
+
+    function checkCollisions() {
+        if (!isHandDetected) return;
+
+        const pointerRadius = 25; 
+
+        for (let i = 0; i < gameObjects.length; i++) {
+            let obj = gameObjects[i];
+            if (!obj.active) continue;
+
+            const dx = obj.x - pointerX;
+            const dy = obj.y - pointerY;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance < obj.radius + pointerRadius) {
+                obj.active = false;
+                
+                if (obj.type === 'coin') {
+                    score += 10;
+                    scoreUI.innerText = score;
+                    canvasElement.style.filter = 'brightness(1.2)';
+                    setTimeout(() => canvasElement.style.filter = 'none', 100);
+                    
+                    if (score % 50 === 0) {
+                        difficultyMultiplier += 0.2;
+                    }
+
+                } else if (obj.type === 'rock') {
+                    lives -= 1;
+                    livesUI.innerText = lives;
+                    
+                    document.body.style.backgroundColor = '#991b1b';
+                    canvasElement.style.transform = 'scaleX(-1) translate(10px, 10px)';
+                    setTimeout(() => {
+                        document.body.style.backgroundColor = '#1a202c';
+                        canvasElement.style.transform = 'scaleX(-1) translate(0, 0)';
+                    }, 150);
+
+                    if (lives <= 0) {
+                        endGame();
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. วงจรหลัก (Render Loop)
+    function gameLoop() {
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+        if (videoElement.readyState >= 2) {
+            canvasCtx.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+        }
+
+        canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+        canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+        if (gameState === 'PLAYING') {
+            for (let i = gameObjects.length - 1; i >= 0; i--) {
+                let obj = gameObjects[i];
+                if (obj.active) {
+                    obj.update();
+                    obj.draw(canvasCtx);
+                } else {
+                    gameObjects.splice(i, 1);
+                }
+            }
+            checkCollisions();
+        }
+
+        if (isHandDetected && (gameState === 'PLAYING' || gameState === 'START')) {
+            canvasCtx.save();
+            canvasCtx.beginPath();
+            canvasCtx.arc(pointerX, pointerY, 25, 0, Math.PI * 2);
+            canvasCtx.fillStyle = 'rgba(0, 255, 255, 0.6)';
+            canvasCtx.fill();
+            canvasCtx.lineWidth = 4;
+            canvasCtx.strokeStyle = '#00FFFF';
+            canvasCtx.stroke();
+            
+            canvasCtx.beginPath();
+            canvasCtx.arc(pointerX, pointerY, 5, 0, Math.PI * 2);
+            canvasCtx.fillStyle = '#FFFFFF';
+            canvasCtx.fill();
+            canvasCtx.restore();
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    function startGame() {
+        startScreen.classList.add('hidden');
+        gameOverScreen.classList.add('hidden');
+        hud.classList.remove('hidden');
+        
+        score = 0;
+        lives = 3;
+        difficultyMultiplier = 1;
+        gameObjects = [];
+        
+        scoreUI.innerText = score;
+        livesUI.innerText = lives;
+        
+        gameState = 'PLAYING';
+        spawnObject();
+    }
+
+    function endGame() {
+        gameState = 'GAMEOVER';
+        hud.classList.add('hidden');
+        gameOverScreen.classList.remove('hidden');
+        finalScoreUI.innerText = score;
+    }
+
+    startBtn.addEventListener('click', startGame);
+    restartBtn.addEventListener('click', startGame);
+
+</script>
+</body>
+</html>
